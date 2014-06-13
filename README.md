@@ -7,10 +7,16 @@ Requirements
 
 Installation
 
-* Grab the sources
-* Run as Maven install
-* You need gridfs-server-X.Y-jar-with-dependencies.jar and gridfs-server.ini
+* Navigate target folder
+* Download gridfs-server-X.Y-jar-with-dependencies.jar and gridfs-server.ini
+* Rename gridfs-server-X.Y-jar-with-dependencies.jar to gridfs-server.jar 
 
 Usage
 
-Fix settings in gridfs-server.ini and run the jar file
+* Fix settings in gridfs-server.ini
+* Run "java -jar gridfs-server.jar gridfs-server.ini"
+
+Compilation
+
+* Grab the sources
+* Run as Maven install
