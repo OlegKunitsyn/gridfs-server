@@ -6,15 +6,16 @@
 package com.gmail.kunicins.olegs.gridfs_server;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.spi.SelectorProvider;
 import java.util.Iterator;
 import java.util.StringTokenizer;
-import java.util.concurrent.ConcurrentHashMap;
 
 import org.bson.types.ObjectId;
 
@@ -23,28 +24,31 @@ import com.mongodb.gridfs.GridFS;
 import com.mongodb.gridfs.GridFSDBFile;
 
 /**
- * The class creates asynchronous thread-safe HTTP server bridged to MongoDB GridFS.
- * Request GridFS objects by MongoID i.e. 
- *   http://127.0.0.1/52d55e9dc469883d09b6b494
- *   http://127.0.0.1:8888/52d55e9dc469883d09b6b494
- *   
- * Returned HTTP status codes:
- *   200 OK
- *   404 File Not found
- *   400 Bad Request
+ * The class creates asynchronous thread-safe HTTP server bridged to MongoDB
+ * GridFS. Request GridFS objects by MongoID i.e.
+ * http://127.0.0.1/52d55e9dc469883d09b6b494
+ * http://127.0.0.1:8888/52d55e9dc469883d09b6b494
+ * 
+ * Returned HTTP status codes: 200 OK 404 File Not found 400 Bad Request
  * 
  * @author Oleg Kunitsyn
  */
-public class Server implements Runnable {	
+public class Server implements Runnable {
 	private static final String HTTP_SERVER = "gridfs-server";
 	private static final String HTTP_FOUND = "HTTP/1.1 200 OK";
 	private static final String HTTP_NOT_FOUND = "HTTP/1.1 404 Not Found";
 	private static final String HTTP_BAD_REQUEST = "HTTP/1.1 400 Bad Request";
-	
-	private ConcurrentHashMap<Integer, SocketChannel> channelPool = new ConcurrentHashMap<Integer, SocketChannel>();
+	private static final int WRITE_BUFFER_SIZE = 1024;
+	private static final int READ_BUFFER_SIZE = 255;
+
+	private static class Attachment {
+		InputStream file;
+	}
+
 	private Selector selector;
+	private ServerSocketChannel server;
 	private GridFS gridFs;
-	
+
 	/**
 	 * Initialize HTTP server
 	 * 
@@ -58,140 +62,197 @@ public class Server implements Runnable {
 			// GridFS initialization
 			Mongo mongoServer = new Mongo(gridFSHost, gridFSPort);
 			this.gridFs = new GridFS(mongoServer.getDB(gridFSDB));
-			
+
 			// HTTP initialization
-			this.selector = Selector.open();
-			ServerSocketChannel server = ServerSocketChannel.open();
-			server.configureBlocking(false);
-			server.socket().bind(new InetSocketAddress(httpPort));
-			server.register(this.selector, SelectionKey.OP_ACCEPT);
+			this.selector = SelectorProvider.provider().openSelector();
+			this.server = ServerSocketChannel.open();
+			this.server.configureBlocking(false);
+			this.server.socket().bind(new InetSocketAddress(httpPort));
+			this.server.register(this.selector, server.validOps());
+
 			System.out.println("Listening on *:" + httpPort + ", uses GridFS '" + gridFSDB + "' on " + gridFSHost + ":" + gridFSPort);
-			
+
 		} catch (IOException e) {
-			System.err.print(e.getMessage());
-			System.err.println(e.getStackTrace()[0]);
 			throw new RuntimeException(e);
 		}
 	}
-	
+
 	/**
-	 * Send HTTP header
+	 * Accepted
 	 * 
-	 * @param channel
+	 * @param key
+	 * @throws IOException
+	 */
+	private void accept(SelectionKey key) throws IOException {
+		SocketChannel newChannel = ((ServerSocketChannel) key.channel()).accept();
+		newChannel.configureBlocking(false);
+		newChannel.register(key.selector(), SelectionKey.OP_READ);
+	}
+
+	/**
+	 * Read request
+	 * 
+	 * @param key
+	 * @throws IOException
+	 */
+	private void read(SelectionKey key) throws IOException {
+		key.interestOps(0);
+		SocketChannel channel = ((SocketChannel) key.channel());
+		Attachment attachment = ((Attachment) key.attachment());
+		ByteBuffer echoBuffer = ByteBuffer.allocate(READ_BUFFER_SIZE);
+		if (attachment == null) {
+			key.attach(attachment = new Attachment());
+		}
+		if (channel.read(echoBuffer) < 1) {
+			close(key);
+			return;
+		}
+
+		// Parse request
+		StringTokenizer tokenizer = new StringTokenizer(new String(echoBuffer.array(), "UTF-8"));
+		echoBuffer = null;
+		String httpMethod = tokenizer.nextToken().toUpperCase();
+		String fileName = tokenizer.nextToken().substring(1);
+
+		System.out.println("Requested file: " + fileName);
+
+		if (!httpMethod.equals("GET")) {
+			writeHeader(key, HTTP_BAD_REQUEST);
+			writeHeader(key, "Server: " + HTTP_SERVER);
+			writeHeader(key, "Connection: close");
+			writeHeader(key, "");
+			key.interestOps(SelectionKey.OP_WRITE);
+			return;
+		}
+
+		try {
+			ObjectId id = new ObjectId(fileName);
+			GridFSDBFile file = gridFs.findOne(id);
+			if (file == null) {
+				throw new IllegalArgumentException();
+			}
+			attachment.file = file.getInputStream();
+			writeHeader(key, HTTP_FOUND);
+			writeHeader(key, "Server: " + HTTP_SERVER);
+			writeHeader(key, "Connection: close");
+			writeHeader(key, "Date: " + file.getUploadDate().toString());
+			writeHeader(key, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
+			writeHeader(key, "Content-Transfer-Encoding: binary");
+			writeHeader(key, "Expires: 0");
+			writeHeader(key, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
+			writeHeader(key, "Pragma: public");
+			writeHeader(key, "Content-Length: " + file.getLength());
+			writeHeader(key, "");
+		} catch (IllegalArgumentException ex) {
+			writeHeader(key, HTTP_NOT_FOUND);
+			writeHeader(key, "Server: " + HTTP_SERVER);
+			writeHeader(key, "Connection: close");
+			writeHeader(key, "");
+		}
+		key.interestOps(SelectionKey.OP_WRITE);
+	}
+
+	/**
+	 * Connected
+	 * 
+	 * @param key
+	 * @throws IOException
+	 */
+	private void connect(SelectionKey key) throws IOException {
+		key.interestOps(0);
+		SocketChannel channel = ((SocketChannel) key.channel());
+		channel.finishConnect();
+	}
+
+	/**
+	 * Write header
+	 * 
+	 * @param key
 	 * @param line
 	 * @throws IOException
 	 */
-	private void sendHeader(SocketChannel channel, String line) throws IOException {
+	private void writeHeader(SelectionKey key, String line) throws IOException {
+		SocketChannel channel = ((SocketChannel) key.channel());
 		channel.write(ByteBuffer.wrap((line + "\r\n").getBytes()));
 	}
-	
+
 	/**
-	 * Send HTTP content
+	 * Write response
 	 * 
-	 * @param channel
-	 * @param content
+	 * @param key
 	 * @throws IOException
 	 */
-	private void sendContent(SocketChannel channel, byte[] content) throws IOException {
-		sendHeader(channel, "");
-		channel.write(ByteBuffer.wrap(content));
+	private void write(SelectionKey key) throws IOException {
+		key.interestOps(key.interestOps() ^ SelectionKey.OP_WRITE);
+		SocketChannel channel = ((SocketChannel) key.channel());
+		Attachment attachment = ((Attachment) key.attachment());
+		if (attachment.file != null) {
+			byte[] echoBuffer = new byte[WRITE_BUFFER_SIZE];
+			int bytesRead = attachment.file.read(echoBuffer);
+			if (bytesRead > 0) {
+				channel.write(ByteBuffer.wrap(echoBuffer));
+			} else {
+				attachment.file.close();
+				attachment.file = null;
+			}
+			echoBuffer = null;
+			key.interestOps(SelectionKey.OP_WRITE);
+		} else {
+			close(key);
+			return;
+		}
 	}
-	
+
 	/**
-	 * @param channel
+	 * Close connection
+	 * 
+	 * @param key
 	 * @throws IOException
 	 */
-	private void closeChannel(SocketChannel channel) throws IOException {
-		this.channelPool.remove(channel.hashCode());
-		channel.close();
+	private void close(SelectionKey key) throws IOException {
+		key.cancel();
+		key.channel().close();
 	}
-	
-	/* (non-Javadoc)
+
+	/*
+	 * (non-Javadoc)
+	 * 
 	 * @see java.lang.Runnable#run()
 	 */
 	public void run() {
-		while (true) {
-			try {
+		try {
+			while (!Thread.currentThread().isInterrupted()) {
 				this.selector.select();
 				Iterator<SelectionKey> it = selector.selectedKeys().iterator();
 				while (it.hasNext()) {
-					SelectionKey key = (SelectionKey) it.next();
-					if ((key.readyOps() & SelectionKey.OP_ACCEPT) == SelectionKey.OP_ACCEPT) {
-						// Accept
-						SocketChannel channel = ((ServerSocketChannel) key.channel()).accept();
-						channel.configureBlocking(false);
-						channel.register(this.selector, SelectionKey.OP_READ);
-						channelPool.put(channel.hashCode(), channel);
-						it.remove();
-					} else if ((key.readyOps() & SelectionKey.OP_READ) == SelectionKey.OP_READ) {
-						// Read
-						SocketChannel channel = (SocketChannel) key.channel();
-						int code = 0;
-						StringBuilder sb = new StringBuilder();
-						ByteBuffer echoBuffer = ByteBuffer.allocate(255);
-						while ((code = channel.read(echoBuffer)) > 0) {
-							byte b[] = new byte[echoBuffer.position()];
-							echoBuffer.flip();
-							echoBuffer.get(b);
-							sb.append(new String(b, "UTF-8"));
+					SelectionKey key = it.next();
+					it.remove();
+					if (key.isValid()) {
+						try {
+							if (key.isAcceptable()) {
+								accept(key);
+							} else if (key.isConnectable()) {
+								connect(key);
+							} else if (key.isReadable()) {
+								read(key);
+							} else if (key.isWritable()) {
+								write(key);
+							}
+						} catch (IOException e) {
+							e.printStackTrace();
+							close(key);
 						}
-						if (code == -1) {
-							closeChannel(channel);
-						}
-						echoBuffer = null;
-						
-						// Parse request
-						StringTokenizer tokenizer = new StringTokenizer(sb.toString());
-						String httpMethod = tokenizer.nextToken().toUpperCase();
-						String fileName = tokenizer.nextToken().substring(1);
-						System.out.println("Requested file: " + fileName);
-	
-						// Write
-						switch(httpMethod) {
-							case "GET":
-								GridFSDBFile file = null;
-								try {
-									ObjectId id = new ObjectId(fileName);
-									file = this.gridFs.findOne(id);
-								} catch (IllegalArgumentException ex) {}
-								if (file != null) {
-									sendHeader(channel, HTTP_FOUND);
-									sendHeader(channel, "Server: " + HTTP_SERVER);
-									sendHeader(channel, "Connection: close");
-									sendHeader(channel, "Date: " + file.getUploadDate().toString());
-									sendHeader(channel, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
-									sendHeader(channel, "Content-Transfer-Encoding: binary");
-									sendHeader(channel, "Expires: 0");
-									sendHeader(channel, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
-									sendHeader(channel, "Pragma: public");
-									sendHeader(channel, "Content-Length: " + file.getLength());
-									byte[] gridfsObject = new byte[(int) file.getLength()];
-									file.getInputStream().read(gridfsObject);
-									sendContent(channel, gridfsObject);
-									gridfsObject = null;
-									break;
-								}
-								sendHeader(channel, HTTP_NOT_FOUND);
-								sendHeader(channel, "Server: " + HTTP_SERVER);
-								sendHeader(channel, "Connection: close");
-								sendContent(channel, "".getBytes());
-								break;
-							default:
-								sendHeader(channel, HTTP_BAD_REQUEST);
-								sendHeader(channel, "Server: " + HTTP_SERVER);
-								sendHeader(channel, "Connection: close");
-								sendContent(channel, "".getBytes());
-						}
-						
-						closeChannel(channel);
-						it.remove();
 					}
-				}		
-			} catch (IOException e) {
-				System.err.print(e.getMessage());
-				System.err.println(e.getStackTrace()[0]);
-				throw new RuntimeException(e);
-			}
+				}
+			}			
+		} catch (IOException e) {
+			e.printStackTrace();
 		}
+		try {
+			this.server.close();
+			this.selector.close();
+		} catch (IOException e) {}
+
+		System.out.println("Server stopped");
 	}
 }

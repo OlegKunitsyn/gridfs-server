@@ -5,7 +5,7 @@ import java.io.InputStream;
 import java.util.Properties;
 
 public class Main {
-	private static final String VERSION = "0.1";
+	private static final String VERSION = "0.2";
 	private static final String WELCOME = ""
 			+ "-- ----------------------------------------------------------------------------\n"
 			+ "-- GridFS Server v" + VERSION + " by Oleg Kunitsyn\n"

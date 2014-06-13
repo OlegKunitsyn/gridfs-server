@@ -1,2 +1,4 @@
 .settings/
 target/maven-archiver/pom.properties
+target/surefire-reports/TEST-com.gmail.kunicins.olegs.gridfs_server.ServerTest.xml
+target/surefire-reports/com.gmail.kunicins.olegs.gridfs_server.ServerTest.txt
