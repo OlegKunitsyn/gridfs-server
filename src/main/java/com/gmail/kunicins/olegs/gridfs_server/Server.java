@@ -19,7 +19,7 @@ import java.util.StringTokenizer;
 
 import org.bson.types.ObjectId;
 
-import com.mongodb.Mongo;
+import com.mongodb.MongoClient;
 import com.mongodb.gridfs.GridFS;
 import com.mongodb.gridfs.GridFSDBFile;
 
@@ -60,9 +60,9 @@ public class Server implements Runnable {
 	public Server(String gridFSHost, int gridFSPort, String gridFSDB, int httpPort) {
 		try {
 			// GridFS initialization
-			Mongo mongoServer = new Mongo(gridFSHost, gridFSPort);
-			this.gridFs = new GridFS(mongoServer.getDB(gridFSDB));
-
+			MongoClient mongo = new MongoClient(gridFSHost, gridFSPort);
+			this.gridFs = new GridFS(mongo.getDB(gridFSDB));
+			
 			// HTTP initialization
 			this.selector = SelectorProvider.provider().openSelector();
 			this.server = ServerSocketChannel.open();
