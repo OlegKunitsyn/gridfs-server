@@ -16,7 +16,7 @@ public class Main {
 			+ "-- ----------------------------------------------------------------------------";
 	
 	public static void main(String args[]) {
-		// fetch configuration file
+		// fetch configuration gridfsFile
 		System.out.println(WELCOME);
 		if (args.length == 0) {
 			System.out.println(USAGE);
@@ -43,7 +43,8 @@ public class Main {
 			config.getProperty("gridfs.host", "127.0.0.1"),
 			Integer.parseInt(config.getProperty("gridfs.port", "27017")),
 			config.getProperty("gridfs.database"),
-			Integer.parseInt(config.getProperty("http.port", "80"))
+			Integer.parseInt(config.getProperty("http.port", "80")),
+			Integer.parseInt(config.getProperty("http.connections", "1000"))
 		);
 		new Thread(server).start();
 	}

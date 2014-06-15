@@ -42,12 +42,14 @@ public class Server implements Runnable {
 	private static final int READ_BUFFER_SIZE = 255;
 
 	private static class Attachment {
-		InputStream file;
+		InputStream gridfsFile;
+		ByteBuffer httpRequest;
 	}
 
 	private Selector selector;
 	private ServerSocketChannel server;
 	private GridFS gridFs;
+	private byte[] writeBuffer = new byte[WRITE_BUFFER_SIZE];
 
 	/**
 	 * Initialize HTTP server
@@ -56,8 +58,9 @@ public class Server implements Runnable {
 	 * @param gridFSPort
 	 * @param gridFSDB
 	 * @param httpPort
+	 * @param concurrentConnections
 	 */
-	public Server(String gridFSHost, int gridFSPort, String gridFSDB, int httpPort) {
+	public Server(String gridFSHost, int gridFSPort, String gridFSDB, int httpPort, int concurrentConnections) {
 		try {
 			// GridFS initialization
 			MongoClient mongo = new MongoClient(gridFSHost, gridFSPort);
@@ -67,7 +70,7 @@ public class Server implements Runnable {
 			this.selector = SelectorProvider.provider().openSelector();
 			this.server = ServerSocketChannel.open();
 			this.server.configureBlocking(false);
-			this.server.socket().bind(new InetSocketAddress(httpPort));
+			this.server.socket().bind(new InetSocketAddress(httpPort), concurrentConnections);
 			this.server.register(this.selector, server.validOps());
 
 			System.out.println("Listening on *:" + httpPort + ", uses GridFS '" + gridFSDB + "' on " + gridFSHost + ":" + gridFSPort);
@@ -90,7 +93,7 @@ public class Server implements Runnable {
 	}
 
 	/**
-	 * Read request
+	 * Read httpRequest
 	 * 
 	 * @param key
 	 * @throws IOException
@@ -99,55 +102,13 @@ public class Server implements Runnable {
 		key.interestOps(0);
 		SocketChannel channel = ((SocketChannel) key.channel());
 		Attachment attachment = ((Attachment) key.attachment());
-		ByteBuffer echoBuffer = ByteBuffer.allocate(READ_BUFFER_SIZE);
 		if (attachment == null) {
 			key.attach(attachment = new Attachment());
 		}
-		if (channel.read(echoBuffer) < 1) {
+		attachment.httpRequest = ByteBuffer.allocate(READ_BUFFER_SIZE);
+		if (channel.read(attachment.httpRequest) < 1) {
 			close(key);
 			return;
-		}
-
-		// Parse request
-		StringTokenizer tokenizer = new StringTokenizer(new String(echoBuffer.array(), "UTF-8"));
-		echoBuffer = null;
-		String httpMethod = tokenizer.nextToken().toUpperCase();
-		String fileName = tokenizer.nextToken().substring(1);
-
-		System.out.println("Requested file: " + fileName);
-
-		if (!httpMethod.equals("GET")) {
-			writeHeader(key, HTTP_BAD_REQUEST);
-			writeHeader(key, "Server: " + HTTP_SERVER);
-			writeHeader(key, "Connection: close");
-			writeHeader(key, "");
-			key.interestOps(SelectionKey.OP_WRITE);
-			return;
-		}
-
-		try {
-			ObjectId id = new ObjectId(fileName);
-			GridFSDBFile file = gridFs.findOne(id);
-			if (file == null) {
-				throw new IllegalArgumentException();
-			}
-			attachment.file = file.getInputStream();
-			writeHeader(key, HTTP_FOUND);
-			writeHeader(key, "Server: " + HTTP_SERVER);
-			writeHeader(key, "Connection: close");
-			writeHeader(key, "Date: " + file.getUploadDate().toString());
-			writeHeader(key, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
-			writeHeader(key, "Content-Transfer-Encoding: binary");
-			writeHeader(key, "Expires: 0");
-			writeHeader(key, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
-			writeHeader(key, "Pragma: public");
-			writeHeader(key, "Content-Length: " + file.getLength());
-			writeHeader(key, "");
-		} catch (IllegalArgumentException ex) {
-			writeHeader(key, HTTP_NOT_FOUND);
-			writeHeader(key, "Server: " + HTTP_SERVER);
-			writeHeader(key, "Connection: close");
-			writeHeader(key, "");
 		}
 		key.interestOps(SelectionKey.OP_WRITE);
 	}
@@ -167,12 +128,11 @@ public class Server implements Runnable {
 	/**
 	 * Write header
 	 * 
-	 * @param key
+	 * @param channel
 	 * @param line
 	 * @throws IOException
 	 */
-	private void writeHeader(SelectionKey key, String line) throws IOException {
-		SocketChannel channel = ((SocketChannel) key.channel());
+	private void writeHeader(SocketChannel channel, String line) throws IOException {
 		channel.write(ByteBuffer.wrap((line + "\r\n").getBytes()));
 	}
 
@@ -186,16 +146,51 @@ public class Server implements Runnable {
 		key.interestOps(key.interestOps() ^ SelectionKey.OP_WRITE);
 		SocketChannel channel = ((SocketChannel) key.channel());
 		Attachment attachment = ((Attachment) key.attachment());
-		if (attachment.file != null) {
-			byte[] echoBuffer = new byte[WRITE_BUFFER_SIZE];
-			int bytesRead = attachment.file.read(echoBuffer);
-			if (bytesRead > 0) {
-				channel.write(ByteBuffer.wrap(echoBuffer));
+		
+		// Send headers
+		if (attachment.httpRequest != null) {
+			StringTokenizer tokenizer = new StringTokenizer(new String(attachment.httpRequest.array(), "UTF-8"));
+			attachment.httpRequest = null;
+			String httpMethod = tokenizer.nextToken().toUpperCase();
+			String mongoId = tokenizer.nextToken().substring(1);
+
+			System.out.println("Requested MongoId: " + mongoId);
+
+			if (httpMethod.equals("GET")) {
+				try {
+					GridFSDBFile file = gridFs.findOne(new ObjectId(mongoId));
+					if (file == null) {
+						throw new IllegalArgumentException();
+					}
+					attachment.gridfsFile = file.getInputStream();
+					writeHeader(channel, HTTP_FOUND);
+					writeHeader(channel, "Date: " + file.getUploadDate().toString());
+					writeHeader(channel, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
+					writeHeader(channel, "Content-Transfer-Encoding: binary");
+					writeHeader(channel, "Expires: 0");
+					writeHeader(channel, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
+					writeHeader(channel, "Pragma: public");
+					writeHeader(channel, "Content-Length: " + file.getLength());
+				} catch (IllegalArgumentException ex) {
+					writeHeader(channel, HTTP_NOT_FOUND);
+				}
 			} else {
-				attachment.file.close();
-				attachment.file = null;
+				writeHeader(channel, HTTP_BAD_REQUEST);
 			}
-			echoBuffer = null;
+			writeHeader(channel, "Server: " + HTTP_SERVER);
+			writeHeader(channel, "Connection: close");
+			writeHeader(channel, "");
+		}
+		
+		// Send content
+		if (attachment.gridfsFile != null) {
+			int bytesRead = attachment.gridfsFile.read(writeBuffer);
+			if (bytesRead > 0) {
+				channel.write(ByteBuffer.wrap(writeBuffer));
+			} else {
+				attachment.gridfsFile.close();
+				attachment.gridfsFile = null;
+			}
 			key.interestOps(SelectionKey.OP_WRITE);
 		} else {
 			close(key);
@@ -239,7 +234,7 @@ public class Server implements Runnable {
 								write(key);
 							}
 						} catch (IOException e) {
-							e.printStackTrace();
+							// e.printStackTrace();
 							close(key);
 						}
 					}
