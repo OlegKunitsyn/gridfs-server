@@ -24,7 +24,7 @@ import com.mongodb.gridfs.GridFS;
 import com.mongodb.gridfs.GridFSDBFile;
 
 /**
- * The class creates asynchronous thread-safe HTTP server bridged to MongoDB
+ * The class creates asynchronous single-thread non-blocking HTTP server bridged to MongoDB
  * GridFS. Request GridFS objects by MongoID i.e.
  * http://127.0.0.1/52d55e9dc469883d09b6b494
  * http://127.0.0.1:8888/52d55e9dc469883d09b6b494

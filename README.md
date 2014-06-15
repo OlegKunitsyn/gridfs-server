@@ -1,9 +1,10 @@
-Asynchronous thread-safe HTTP server bridged to Mongo GridFS.
+Non-blocking HTTP server bridged to Mongo GridFS.
 Cool and free.
 
 Requirements
 
 * Java 1.7+
+* Mongo java driver
 
 Installation
 
