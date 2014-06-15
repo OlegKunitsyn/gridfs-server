@@ -6,7 +6,6 @@
 package com.gmail.kunicins.olegs.gridfs_server;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
@@ -19,6 +18,9 @@ import java.util.StringTokenizer;
 
 import org.bson.types.ObjectId;
 
+import com.mongodb.BasicDBObject;
+import com.mongodb.DBCollection;
+import com.mongodb.DBCursor;
 import com.mongodb.MongoClient;
 import com.mongodb.gridfs.GridFS;
 import com.mongodb.gridfs.GridFSDBFile;
@@ -38,18 +40,18 @@ public class Server implements Runnable {
 	private static final String HTTP_FOUND = "HTTP/1.1 200 OK";
 	private static final String HTTP_NOT_FOUND = "HTTP/1.1 404 Not Found";
 	private static final String HTTP_BAD_REQUEST = "HTTP/1.1 400 Bad Request";
-	private static final int WRITE_BUFFER_SIZE = 1024;
-	private static final int READ_BUFFER_SIZE = 255;
+	private static final int BUFFER_SIZE = 255;
 
 	private static class Attachment {
-		InputStream gridfsFile;
+		DBCursor fileChunks;
 		ByteBuffer httpRequest;
+		ByteBuffer httpResponse;
 	}
 
 	private Selector selector;
 	private ServerSocketChannel server;
 	private GridFS gridFs;
-	private byte[] writeBuffer = new byte[WRITE_BUFFER_SIZE];
+	private DBCollection gridFsCollection;
 
 	/**
 	 * Initialize HTTP server
@@ -65,6 +67,7 @@ public class Server implements Runnable {
 			// GridFS initialization
 			MongoClient mongo = new MongoClient(gridFSHost, gridFSPort);
 			this.gridFs = new GridFS(mongo.getDB(gridFSDB));
+			this.gridFsCollection = mongo.getDB(gridFSDB).getCollection("fs.chunks");
 			
 			// HTTP initialization
 			this.selector = SelectorProvider.provider().openSelector();
@@ -105,11 +108,50 @@ public class Server implements Runnable {
 		if (attachment == null) {
 			key.attach(attachment = new Attachment());
 		}
-		attachment.httpRequest = ByteBuffer.allocate(READ_BUFFER_SIZE);
+		attachment.httpRequest = ByteBuffer.allocate(BUFFER_SIZE);
 		if (channel.read(attachment.httpRequest) < 1) {
 			close(key);
 			return;
 		}
+		
+		// Add headers
+		if (attachment.httpRequest != null) {
+			StringTokenizer tokenizer = new StringTokenizer(new String(attachment.httpRequest.array(), "UTF-8"));
+			attachment.httpRequest = null;
+			String httpMethod = tokenizer.nextToken().toUpperCase();
+			String mongoId = tokenizer.nextToken().substring(1);
+
+			System.out.println("Requested MongoId: " + mongoId);
+
+			attachment.httpResponse = ByteBuffer.allocate(BUFFER_SIZE);
+			if (httpMethod.equals("GET")) {
+				try {
+					GridFSDBFile file = this.gridFs.findOne(new ObjectId(mongoId));
+					if (file == null) {
+						throw new IllegalArgumentException();
+					}
+					attachment.fileChunks = this.gridFsCollection.find(new BasicDBObject("files_id", new ObjectId(mongoId)));
+					attachment.httpResponse = ByteBuffer.allocate((int)file.getChunkSize());
+					writeHeader(key, HTTP_FOUND);
+					writeHeader(key, "Date: " + file.getUploadDate().toString());
+					writeHeader(key, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
+					writeHeader(key, "Content-Transfer-Encoding: binary");
+					writeHeader(key, "Expires: 0");
+					writeHeader(key, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
+					writeHeader(key, "Pragma: public");
+					writeHeader(key, "Content-Length: " + file.getLength());
+				} catch (IllegalArgumentException ex) {
+					writeHeader(key, HTTP_NOT_FOUND);
+				}
+			} else {
+				writeHeader(key, HTTP_BAD_REQUEST);
+			}
+			writeHeader(key, "Server: " + HTTP_SERVER);
+			writeHeader(key, "Connection: close");
+			writeHeader(key, "");
+			attachment.httpResponse.flip();
+		}
+		
 		key.interestOps(SelectionKey.OP_WRITE);
 	}
 
@@ -128,12 +170,13 @@ public class Server implements Runnable {
 	/**
 	 * Write header
 	 * 
-	 * @param channel
+	 * @param key
 	 * @param line
 	 * @throws IOException
 	 */
-	private void writeHeader(SocketChannel channel, String line) throws IOException {
-		channel.write(ByteBuffer.wrap((line + "\r\n").getBytes()));
+	private void writeHeader(SelectionKey key, String line) throws IOException {
+		Attachment attachment = ((Attachment) key.attachment());
+		attachment.httpResponse.put(ByteBuffer.wrap((line + "\r\n").getBytes()));
 	}
 
 	/**
@@ -143,58 +186,27 @@ public class Server implements Runnable {
 	 * @throws IOException
 	 */
 	private void write(SelectionKey key) throws IOException {
-		key.interestOps(key.interestOps() ^ SelectionKey.OP_WRITE);
 		SocketChannel channel = ((SocketChannel) key.channel());
 		Attachment attachment = ((Attachment) key.attachment());
 		
-		// Send headers
-		if (attachment.httpRequest != null) {
-			StringTokenizer tokenizer = new StringTokenizer(new String(attachment.httpRequest.array(), "UTF-8"));
-			attachment.httpRequest = null;
-			String httpMethod = tokenizer.nextToken().toUpperCase();
-			String mongoId = tokenizer.nextToken().substring(1);
-
-			System.out.println("Requested MongoId: " + mongoId);
-
-			if (httpMethod.equals("GET")) {
-				try {
-					GridFSDBFile file = gridFs.findOne(new ObjectId(mongoId));
-					if (file == null) {
-						throw new IllegalArgumentException();
-					}
-					attachment.gridfsFile = file.getInputStream();
-					writeHeader(channel, HTTP_FOUND);
-					writeHeader(channel, "Date: " + file.getUploadDate().toString());
-					writeHeader(channel, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
-					writeHeader(channel, "Content-Transfer-Encoding: binary");
-					writeHeader(channel, "Expires: 0");
-					writeHeader(channel, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
-					writeHeader(channel, "Pragma: public");
-					writeHeader(channel, "Content-Length: " + file.getLength());
-				} catch (IllegalArgumentException ex) {
-					writeHeader(channel, HTTP_NOT_FOUND);
-				}
-			} else {
-				writeHeader(channel, HTTP_BAD_REQUEST);
-			}
-			writeHeader(channel, "Server: " + HTTP_SERVER);
-			writeHeader(channel, "Connection: close");
-			writeHeader(channel, "");
+		channel.write(attachment.httpResponse);
+		if (attachment.httpResponse.remaining()  > 0) {
+			return;
 		}
 		
-		// Send content
-		if (attachment.gridfsFile != null) {
-			int bytesRead = attachment.gridfsFile.read(writeBuffer);
-			if (bytesRead > 0) {
-				channel.write(ByteBuffer.wrap(writeBuffer));
+		// Put one chunk
+		if (attachment.fileChunks != null) {
+			if (attachment.fileChunks.hasNext()) {
+				attachment.httpResponse.clear();
+				attachment.httpResponse.put((byte[])attachment.fileChunks.next().get("data"));
+				attachment.httpResponse.flip();
 			} else {
-				attachment.gridfsFile.close();
-				attachment.gridfsFile = null;
+				attachment.fileChunks.close();
+				attachment.fileChunks = null;
+				close(key);
 			}
-			key.interestOps(SelectionKey.OP_WRITE);
 		} else {
 			close(key);
-			return;
 		}
 	}
 

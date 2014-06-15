@@ -190,7 +190,7 @@ public class ServerTest {
 	
 	@Test
 	public void testConcurrentDownload() throws InterruptedException {
-		int concurrentConnections = 100;
+		int concurrentConnections = CONCURRENT_CONNECTIONS;
 		
 		// initialize threads
 		DownloadThread thread;
@@ -226,5 +226,5 @@ public class ServerTest {
 		
 		System.out.println("Benchmark, Mbps: " + mbps);
 		Assert.assertTrue((Double.compare(mbps, shallBeMoreThan) > 0));
-	}
+	}	
 }
