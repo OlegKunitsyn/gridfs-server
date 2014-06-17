@@ -13,6 +13,7 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
+import java.text.SimpleDateFormat;
 import java.util.Iterator;
 import java.util.StringTokenizer;
 
@@ -44,7 +45,6 @@ public class Server implements Runnable {
 
 	private static class Attachment {
 		DBCursor fileChunks;
-		ByteBuffer httpRequest;
 		ByteBuffer httpResponse;
 	}
 
@@ -52,6 +52,7 @@ public class Server implements Runnable {
 	private ServerSocketChannel server;
 	private GridFS gridFs;
 	private DBCollection gridFsCollection;
+	private ByteBuffer httpRequest = ByteBuffer.allocate(BUFFER_SIZE);
 
 	/**
 	 * Initialize HTTP server
@@ -102,22 +103,21 @@ public class Server implements Runnable {
 	 * @throws IOException
 	 */
 	private void read(SelectionKey key) throws IOException {
-		key.interestOps(0);
 		SocketChannel channel = ((SocketChannel) key.channel());
-		Attachment attachment = ((Attachment) key.attachment());
-		if (attachment == null) {
-			key.attach(attachment = new Attachment());
-		}
-		attachment.httpRequest = ByteBuffer.allocate(BUFFER_SIZE);
-		if (channel.read(attachment.httpRequest) < 1) {
+		this.httpRequest.clear();
+		if (channel.read(this.httpRequest) < 1) {
 			close(key);
 			return;
 		}
 		
+		Attachment attachment = ((Attachment) key.attachment());
+		if (attachment == null) {
+			key.attach(attachment = new Attachment());
+		}
+		
 		// Add headers
-		if (attachment.httpRequest != null) {
-			StringTokenizer tokenizer = new StringTokenizer(new String(attachment.httpRequest.array(), "UTF-8"));
-			attachment.httpRequest = null;
+		if (attachment.httpResponse == null) {
+			StringTokenizer tokenizer = new StringTokenizer(new String(this.httpRequest.array(), "UTF-8"));
 			String httpMethod = tokenizer.nextToken().toUpperCase();
 			String mongoId = tokenizer.nextToken().substring(1);
 
@@ -133,13 +133,13 @@ public class Server implements Runnable {
 					attachment.fileChunks = this.gridFsCollection.find(new BasicDBObject("files_id", new ObjectId(mongoId)));
 					attachment.httpResponse = ByteBuffer.allocate((int)file.getChunkSize());
 					writeHeader(key, HTTP_FOUND);
-					writeHeader(key, "Date: " + file.getUploadDate().toString());
-					writeHeader(key, "Content-Disposition: attachment; filename=\"" + file.getFilename() + "\"");
-					writeHeader(key, "Content-Transfer-Encoding: binary");
-					writeHeader(key, "Expires: 0");
-					writeHeader(key, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
-					writeHeader(key, "Pragma: public");
+					writeHeader(key, "Content-Type: " + file.getContentType());
 					writeHeader(key, "Content-Length: " + file.getLength());
+					writeHeader(key, "ETag: \"" + file.getMD5() + "\"");
+					writeHeader(key, "Last-Modified: " + new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz").format(file.getUploadDate()));
+					writeHeader(key, "Cache-Control: must-revalidate, post-check=0, pre-check=0");
+					writeHeader(key, "Expires: 0");
+					writeHeader(key, "Pragma: public");
 				} catch (IllegalArgumentException ex) {
 					writeHeader(key, HTTP_NOT_FOUND);
 				}
@@ -150,9 +150,8 @@ public class Server implements Runnable {
 			writeHeader(key, "Connection: close");
 			writeHeader(key, "");
 			attachment.httpResponse.flip();
+			key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
 		}
-		
-		key.interestOps(SelectionKey.OP_WRITE);
 	}
 
 	/**
@@ -188,7 +187,6 @@ public class Server implements Runnable {
 	private void write(SelectionKey key) throws IOException {
 		SocketChannel channel = ((SocketChannel) key.channel());
 		Attachment attachment = ((Attachment) key.attachment());
-		
 		channel.write(attachment.httpResponse);
 		if (attachment.httpResponse.remaining()  > 0) {
 			return;

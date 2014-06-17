@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.math.BigInteger;
 import java.net.ConnectException;
 import java.net.URL;
+import java.net.URLConnection;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Date;
@@ -88,7 +89,14 @@ public class ServerTest {
 				InputStream in;
 				try {
 					url = new URL("http://127.0.0.1:" + HTTP_PORT + this.mongoId);
-					in = url.openStream();
+					URLConnection urlConnection = url.openConnection();
+					urlConnection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+					urlConnection.setRequestProperty("Accept-Encoding", "gzip, deflate");
+					urlConnection.setRequestProperty("Accept-Language", "en-US,en;q=0.5");
+					urlConnection.setRequestProperty("Connection", "keep-alive");
+					urlConnection.setRequestProperty("Host", "127.0.0.1:8080");
+					urlConnection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:30.0) Gecko/20100101 Firefox/30.0");
+					in = urlConnection.getInputStream();
 				} catch (ConnectException e) {
 					System.err.println(e.getMessage());
 					return;
