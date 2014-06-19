@@ -227,7 +227,7 @@ public class ServerTest {
 			Download file = new Download("/" + TestFile.MID.id);
 			file.run();
 			Assert.assertEquals(TestFile.MID.md5, file.md5);
-			received += 786486;
+			received += file.size;
 			duration = new Date().getTime() - startTimestamp;
 		} while (duration < testTime);
 		double mbps = ((1000 * received / duration) / 1_000_000) * 8;
