@@ -30,7 +30,8 @@ public class Main {
 		} catch (Exception e) {
 			System.err.println("Configuration error: " + e.getMessage());
 			try {
-				file.close();
+				if (null != file)
+					file.close();
 			} catch (Exception ex) {
 			}
 			finally {

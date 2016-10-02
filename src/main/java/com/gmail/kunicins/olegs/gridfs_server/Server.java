@@ -15,6 +15,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
 import java.text.SimpleDateFormat;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.StringTokenizer;
 
 import org.bson.types.ObjectId;
@@ -118,7 +119,7 @@ public class Server implements Runnable {
 		// Add headers
 		if (attachment.httpResponse == null) {
 			StringTokenizer tokenizer = new StringTokenizer(new String(this.httpRequest.array(), "UTF-8"));
-			String httpMethod = tokenizer.nextToken().toUpperCase();
+			String httpMethod = tokenizer.nextToken().toUpperCase(Locale.ENGLISH);
 			String mongoId = tokenizer.nextToken().substring(1);
 
 			System.out.println("Requested MongoId: " + mongoId);
@@ -175,7 +176,7 @@ public class Server implements Runnable {
 	 */
 	private void writeHeader(SelectionKey key, String line) throws IOException {
 		Attachment attachment = ((Attachment) key.attachment());
-		attachment.httpResponse.put(ByteBuffer.wrap((line + "\r\n").getBytes()));
+		attachment.httpResponse.put(ByteBuffer.wrap((line + "\r\n").getBytes("UTF-8")));
 	}
 
 	/**
